@@ -1,126 +1,87 @@
 import logging
+import multiprocessing
 import os.path
 import pathlib
+import platform
+from typing import List
 from unittest.mock import Mock, patch
 
 import pytest
 import sounddevice
 from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtGui import QValidator
-from PyQt6.QtWidgets import QPushButton, QToolBar, QTableWidget
+from PyQt6.QtGui import QValidator, QKeyEvent
+from PyQt6.QtWidgets import QPushButton, QToolBar, QTableWidget, QApplication, QMessageBox
+from _pytest.fixtures import SubRequest
 from pytestqt.qtbot import QtBot
 
+from buzz.__version__ import VERSION
 from buzz.cache import TasksCache
-from buzz.gui import (AboutDialog, AdvancedSettingsDialog, Application,
-                      AudioDevicesComboBox, DownloadModelProgressDialog,
+from buzz.gui import (AboutDialog, AdvancedSettingsDialog, AudioDevicesComboBox, DownloadModelProgressDialog,
                       FileTranscriberWidget, LanguagesComboBox, MainWindow,
-                      ModelComboBox, RecordingTranscriberWidget,
+                      RecordingTranscriberWidget,
                       TemperatureValidator, TextDisplayBox,
-                      TranscriptionTasksTableWidget, TranscriptionViewerWidget)
+                      TranscriptionTasksTableWidget, TranscriptionViewerWidget, HuggingFaceSearchLineEdit,
+                      TranscriptionOptionsGroupBox)
+from buzz.model_loader import ModelType
 from buzz.transcriber import (FileTranscriptionOptions, FileTranscriptionTask,
-                              Model, Segment, TranscriptionOptions)
+                              Segment, TranscriptionOptions)
+from tests.mock_sounddevice import MockInputStream, mock_query_devices
+from .mock_qt import MockNetworkAccessManager, MockNetworkReply
+
+if platform.system() == 'Linux':
+    multiprocessing.set_start_method('spawn')
 
 
-class TestApplication:
-    # FIXME: this seems to break the tests if not run??
-    app = Application()
-
-    def test_should_open_application(self):
-        assert self.app is not None
+@pytest.fixture(scope='module', autouse=True)
+def audio_setup():
+    with patch('sounddevice.query_devices') as query_devices_mock, \
+            patch('sounddevice.InputStream', side_effect=MockInputStream), \
+            patch('sounddevice.check_input_settings'):
+        query_devices_mock.return_value = mock_query_devices
+        sounddevice.default.device = 3, 4
+        yield
 
 
 class TestLanguagesComboBox:
-    languagesComboxBox = LanguagesComboBox('en')
 
-    def test_should_show_sorted_whisper_languages(self):
-        assert self.languagesComboxBox.itemText(0) == 'Detect Language'
-        assert self.languagesComboxBox.itemText(10) == 'Belarusian'
-        assert self.languagesComboxBox.itemText(20) == 'Dutch'
-        assert self.languagesComboxBox.itemText(30) == 'Gujarati'
-        assert self.languagesComboxBox.itemText(40) == 'Japanese'
-        assert self.languagesComboxBox.itemText(50) == 'Lithuanian'
+    def test_should_show_sorted_whisper_languages(self, qtbot):
+        languages_combox_box = LanguagesComboBox('en')
+        qtbot.add_widget(languages_combox_box)
+        assert languages_combox_box.itemText(0) == 'Detect Language'
+        assert languages_combox_box.itemText(10) == 'Belarusian'
+        assert languages_combox_box.itemText(20) == 'Dutch'
+        assert languages_combox_box.itemText(30) == 'Gujarati'
+        assert languages_combox_box.itemText(40) == 'Japanese'
+        assert languages_combox_box.itemText(50) == 'Lithuanian'
 
-    def test_should_select_en_as_default_language(self):
-        assert self.languagesComboxBox.currentText() == 'English'
+    def test_should_select_en_as_default_language(self, qtbot):
+        languages_combox_box = LanguagesComboBox('en')
+        qtbot.add_widget(languages_combox_box)
+        assert languages_combox_box.currentText() == 'English'
 
-    def test_should_select_detect_language_as_default(self):
+    def test_should_select_detect_language_as_default(self, qtbot):
         languages_combo_box = LanguagesComboBox(None)
+        qtbot.add_widget(languages_combo_box)
         assert languages_combo_box.currentText() == 'Detect Language'
 
 
-class TestModelComboBox:
-    model_combo_box = ModelComboBox(
-        default_model=Model.WHISPER_CPP_BASE, parent=None)
-
-    def test_should_show_qualities(self):
-        assert self.model_combo_box.itemText(0) == 'Whisper - Tiny'
-        assert self.model_combo_box.itemText(1) == 'Whisper - Base'
-        assert self.model_combo_box.itemText(2) == 'Whisper - Small'
-        assert self.model_combo_box.itemText(3) == 'Whisper - Medium'
-
-    def test_should_select_default_model(self):
-        assert self.model_combo_box.currentText() == 'Whisper.cpp - Base'
-
-
 class TestAudioDevicesComboBox:
-    mock_query_devices = [
-        {'name': 'Background Music', 'index': 0, 'hostapi': 0, 'max_input_channels': 2, 'max_output_channels': 2,
-         'default_low_input_latency': 0.01,
-         'default_low_output_latency': 0.008, 'default_high_input_latency': 0.1, 'default_high_output_latency': 0.064,
-         'default_samplerate': 8000.0},
-        {'name': 'Background Music (UI Sounds)', 'index': 1, 'hostapi': 0, 'max_input_channels': 2,
-         'max_output_channels': 2, 'default_low_input_latency': 0.01,
-         'default_low_output_latency': 0.008, 'default_high_input_latency': 0.1, 'default_high_output_latency': 0.064,
-         'default_samplerate': 8000.0},
-        {'name': 'BlackHole 2ch', 'index': 2, 'hostapi': 0, 'max_input_channels': 2, 'max_output_channels': 2,
-         'default_low_input_latency': 0.01,
-         'default_low_output_latency': 0.0013333333333333333, 'default_high_input_latency': 0.1,
-         'default_high_output_latency': 0.010666666666666666, 'default_samplerate': 48000.0},
-        {'name': 'MacBook Pro Microphone', 'index': 3, 'hostapi': 0, 'max_input_channels': 1, 'max_output_channels': 0,
-         'default_low_input_latency': 0.034520833333333334,
-         'default_low_output_latency': 0.01, 'default_high_input_latency': 0.043854166666666666,
-         'default_high_output_latency': 0.1, 'default_samplerate': 48000.0},
-        {'name': 'MacBook Pro Speakers', 'index': 4, 'hostapi': 0, 'max_input_channels': 0, 'max_output_channels': 2,
-         'default_low_input_latency': 0.01,
-         'default_low_output_latency': 0.0070416666666666666, 'default_high_input_latency': 0.1,
-         'default_high_output_latency': 0.016375, 'default_samplerate': 48000.0},
-        {'name': 'Null Audio Device', 'index': 5, 'hostapi': 0, 'max_input_channels': 2, 'max_output_channels': 2,
-         'default_low_input_latency': 0.01,
-         'default_low_output_latency': 0.0014512471655328798, 'default_high_input_latency': 0.1,
-         'default_high_output_latency': 0.011609977324263039, 'default_samplerate': 44100.0},
-        {'name': 'Multi-Output Device', 'index': 6, 'hostapi': 0, 'max_input_channels': 0, 'max_output_channels': 2,
-         'default_low_input_latency': 0.01,
-         'default_low_output_latency': 0.0033333333333333335, 'default_high_input_latency': 0.1,
-         'default_high_output_latency': 0.012666666666666666, 'default_samplerate': 48000.0},
-    ]
-
     def test_get_devices(self):
-        with patch('sounddevice.query_devices') as query_devices_mock:
-            query_devices_mock.return_value = self.mock_query_devices
+        audio_devices_combo_box = AudioDevicesComboBox()
 
-            sounddevice.default.device = 3, 4
+        assert audio_devices_combo_box.itemText(0) == 'Background Music'
+        assert audio_devices_combo_box.itemText(1) == 'Background Music (UI Sounds)'
+        assert audio_devices_combo_box.itemText(2) == 'BlackHole 2ch'
+        assert audio_devices_combo_box.itemText(3) == 'MacBook Pro Microphone'
+        assert audio_devices_combo_box.itemText(4) == 'Null Audio Device'
 
-            audio_devices_combo_box = AudioDevicesComboBox()
-
-            assert audio_devices_combo_box.itemText(0) == 'Background Music'
-            assert audio_devices_combo_box.itemText(
-                1) == 'Background Music (UI Sounds)'
-            assert audio_devices_combo_box.itemText(2) == 'BlackHole 2ch'
-            assert audio_devices_combo_box.itemText(
-                3) == 'MacBook Pro Microphone'
-            assert audio_devices_combo_box.itemText(4) == 'Null Audio Device'
-
-            assert audio_devices_combo_box.currentText() == 'MacBook Pro Microphone'
+        assert audio_devices_combo_box.currentText() == 'MacBook Pro Microphone'
 
     def test_select_default_mic_when_no_default(self):
-        with patch('sounddevice.query_devices') as query_devices_mock:
-            query_devices_mock.return_value = self.mock_query_devices
+        sounddevice.default.device = -1, 1
 
-            sounddevice.default.device = -1, 1
-
-            audio_devices_combo_box = AudioDevicesComboBox()
-
-            assert audio_devices_combo_box.currentText() == 'Background Music'
+        audio_devices_combo_box = AudioDevicesComboBox()
+        assert audio_devices_combo_box.currentText() == 'Background Music'
 
 
 class TestDownloadModelProgressDialog:
@@ -150,15 +111,31 @@ class TestDownloadModelProgressDialog:
         assert dialog.windowModality() == Qt.WindowModality.ApplicationModal
 
 
-@pytest.fixture
-def tasks_cache(tmp_path):
+@pytest.fixture()
+def tasks_cache(tmp_path, request: SubRequest):
     cache = TasksCache(cache_dir=str(tmp_path))
+    if hasattr(request, 'param'):
+        tasks: List[FileTranscriptionTask] = request.param
+        cache.save(tasks)
     yield cache
     cache.clear()
 
 
 def get_test_asset(filename: str):
     return os.path.join(os.path.dirname(__file__), '../testdata/', filename)
+
+
+mock_tasks = [
+    FileTranscriptionTask(file_path='', transcription_options=TranscriptionOptions(),
+                          file_transcription_options=FileTranscriptionOptions(file_paths=[]), model_path='',
+                          status=FileTranscriptionTask.Status.COMPLETED),
+    FileTranscriptionTask(file_path='', transcription_options=TranscriptionOptions(),
+                          file_transcription_options=FileTranscriptionOptions(file_paths=[]), model_path='',
+                          status=FileTranscriptionTask.Status.CANCELED),
+    FileTranscriptionTask(file_path='', transcription_options=TranscriptionOptions(),
+                          file_transcription_options=FileTranscriptionOptions(file_paths=[]), model_path='',
+                          status=FileTranscriptionTask.Status.FAILED),
+]
 
 
 class TestMainWindow:
@@ -170,43 +147,153 @@ class TestMainWindow:
         assert window.windowIcon().pixmap(QSize(64, 64)).isNull() is False
         window.close()
 
+    @pytest.mark.xfail(condition=platform.system() == 'Windows', reason='Timing out')
     def test_should_run_transcription_task(self, qtbot: QtBot, tasks_cache):
         window = MainWindow(tasks_cache=tasks_cache)
         qtbot.add_widget(window)
 
-        toolbar: QToolBar = window.findChild(QToolBar)
-        new_transcription_action = [action for action in toolbar.actions() if action.text() == 'New Transcription'][0]
+        self._start_new_transcription(window)
 
+        open_transcript_action = self._get_toolbar_action(window, 'Open Transcript')
+        assert open_transcript_action.isEnabled() is False
+
+        table_widget: QTableWidget = window.findChild(QTableWidget)
+        qtbot.wait_until(self._assert_task_status(table_widget, 0, 'Completed'), timeout=2 * 60 * 1000)
+
+        table_widget.setCurrentIndex(table_widget.indexFromItem(table_widget.item(0, 1)))
+        assert open_transcript_action.isEnabled()
+
+    def test_should_run_and_cancel_transcription_task(self, qtbot, tasks_cache):
+        window = MainWindow(tasks_cache=tasks_cache)
+        qtbot.add_widget(window)
+
+        self._start_new_transcription(window)
+
+        table_widget: QTableWidget = window.findChild(QTableWidget)
+
+        def assert_task_in_progress():
+            assert table_widget.rowCount() > 0
+            assert table_widget.item(0, 1).text() == 'whisper-french.mp3'
+            assert 'In Progress' in table_widget.item(0, 2).text()
+
+        qtbot.wait_until(assert_task_in_progress, timeout=2 * 60 * 1000)
+
+        # Stop task in progress
+        table_widget.selectRow(0)
+        window.toolbar.stop_transcription_action.trigger()
+
+        qtbot.wait_until(self._assert_task_status(table_widget, 0, 'Canceled'), timeout=60 * 1000)
+
+        table_widget.selectRow(0)
+        assert window.toolbar.stop_transcription_action.isEnabled() is False
+        assert window.toolbar.open_transcript_action.isEnabled() is False
+
+        window.close()
+
+    @pytest.mark.parametrize('tasks_cache', [mock_tasks], indirect=True)
+    def test_should_load_tasks_from_cache(self, qtbot, tasks_cache):
+        window = MainWindow(tasks_cache=tasks_cache)
+        qtbot.add_widget(window)
+
+        table_widget: QTableWidget = window.findChild(QTableWidget)
+        assert table_widget.rowCount() == 3
+
+        assert table_widget.item(0, 2).text() == 'Completed'
+        table_widget.selectRow(0)
+        assert window.toolbar.open_transcript_action.isEnabled()
+
+        assert table_widget.item(1, 2).text() == 'Canceled'
+        table_widget.selectRow(1)
+        assert window.toolbar.open_transcript_action.isEnabled() is False
+
+        assert table_widget.item(2, 2).text() == 'Failed'
+        table_widget.selectRow(2)
+        assert window.toolbar.open_transcript_action.isEnabled() is False
+        window.close()
+
+    @pytest.mark.parametrize('tasks_cache', [mock_tasks], indirect=True)
+    def test_should_clear_history_with_rows_selected(self, qtbot, tasks_cache):
+        window = MainWindow(tasks_cache=tasks_cache)
+
+        table_widget: QTableWidget = window.findChild(QTableWidget)
+        table_widget.selectAll()
+
+        with patch('PyQt6.QtWidgets.QMessageBox.question') as question_message_box_mock:
+            question_message_box_mock.return_value = QMessageBox.StandardButton.Yes
+            window.toolbar.clear_history_action.trigger()
+
+        assert table_widget.rowCount() == 0
+        window.close()
+
+    @pytest.mark.parametrize('tasks_cache', [mock_tasks], indirect=True)
+    def test_should_have_clear_history_action_disabled_with_no_rows_selected(self, qtbot, tasks_cache):
+        window = MainWindow(tasks_cache=tasks_cache)
+        qtbot.add_widget(window)
+
+        assert window.toolbar.clear_history_action.isEnabled() is False
+        window.close()
+
+    @pytest.mark.parametrize('tasks_cache', [mock_tasks], indirect=True)
+    def test_should_open_transcription_viewer(self, qtbot, tasks_cache):
+        window = MainWindow(tasks_cache=tasks_cache)
+        qtbot.add_widget(window)
+
+        table_widget: QTableWidget = window.findChild(QTableWidget)
+
+        table_widget.selectRow(0)
+
+        window.toolbar.open_transcript_action.trigger()
+
+        transcription_viewer = window.findChild(TranscriptionViewerWidget)
+        assert transcription_viewer is not None
+
+        window.close()
+
+    @pytest.mark.parametrize('tasks_cache', [mock_tasks], indirect=True)
+    def test_should_have_open_transcript_action_disabled_with_no_rows_selected(self, qtbot, tasks_cache):
+        window = MainWindow(tasks_cache=tasks_cache)
+        qtbot.add_widget(window)
+
+        assert window.toolbar.open_transcript_action.isEnabled() is False
+        window.close()
+
+    @staticmethod
+    def _start_new_transcription(window: MainWindow):
         with patch('PyQt6.QtWidgets.QFileDialog.getOpenFileNames') as open_file_names_mock:
             open_file_names_mock.return_value = ([get_test_asset('whisper-french.mp3')], '')
+            new_transcription_action = TestMainWindow._get_toolbar_action(window, 'New Transcription')
             new_transcription_action.trigger()
 
         file_transcriber_widget: FileTranscriberWidget = window.findChild(FileTranscriberWidget)
         run_button: QPushButton = file_transcriber_widget.findChild(QPushButton)
         run_button.click()
 
-        def check_task_completed():
-            table_widget: QTableWidget = window.findChild(QTableWidget)
-            assert table_widget.rowCount() == 1
-            assert table_widget.item(0, 1).text() == 'whisper-french.mp3'
-            assert table_widget.item(0, 2).text() == 'Completed'
+    @staticmethod
+    def _assert_task_status(table_widget: QTableWidget, row_index: int, expected_status: str):
+        def assert_task_canceled():
+            assert table_widget.rowCount() > 0
+            assert table_widget.item(row_index, 1).text() == 'whisper-french.mp3'
+            assert table_widget.item(row_index, 2).text() == expected_status
 
-        qtbot.wait_until(check_task_completed, timeout=60 * 1000)
+        return assert_task_canceled
+
+    @staticmethod
+    def _get_toolbar_action(window: MainWindow, text: str):
+        toolbar: QToolBar = window.findChild(QToolBar)
+        return [action for action in toolbar.actions() if action.text() == text][0]
 
 
 class TestFileTranscriberWidget:
-    widget = FileTranscriberWidget(
-        file_paths=['testdata/whisper-french.mp3'], parent=None)
-
-    def test_should_set_window_title_and_size(self, qtbot: QtBot):
-        qtbot.addWidget(self.widget)
-        assert self.widget.windowTitle() == 'whisper-french.mp3'
-        assert self.widget.size() == QSize(420, 270)
+    def test_should_set_window_title(self, qtbot: QtBot):
+        widget = FileTranscriberWidget(
+            file_paths=['testdata/whisper-french.mp3'], parent=None)
+        qtbot.add_widget(widget)
+        assert widget.windowTitle() == 'whisper-french.mp3'
 
     def test_should_emit_triggered_event(self, qtbot: QtBot):
         widget = FileTranscriberWidget(
             file_paths=['testdata/whisper-french.mp3'], parent=None)
-        qtbot.addWidget(widget)
+        qtbot.add_widget(widget)
 
         mock_triggered = Mock()
         widget.triggered.connect(mock_triggered)
@@ -217,23 +304,31 @@ class TestFileTranscriberWidget:
         transcription_options, file_transcription_options, model_path = mock_triggered.call_args[
             0][0]
         assert transcription_options.language is None
-        assert transcription_options.model == Model.WHISPER_TINY
         assert file_transcription_options.file_paths == [
             'testdata/whisper-french.mp3']
         assert len(model_path) > 0
 
 
 class TestAboutDialog:
-    def test_should_create(self):
-        dialog = AboutDialog()
-        assert dialog is not None
+    def test_should_check_for_updates(self, qtbot: QtBot):
+        reply = MockNetworkReply(data={'name': 'v' + VERSION})
+        manager = MockNetworkAccessManager(reply=reply)
+        dialog = AboutDialog(network_access_manager=manager)
+        qtbot.add_widget(dialog)
+
+        mock_message_box_information = Mock()
+        QMessageBox.information = mock_message_box_information
+
+        with qtbot.wait_signal(dialog.network_access_manager.finished):
+            dialog.check_updates_button.click()
+
+        mock_message_box_information.assert_called_with(dialog, '', "You're up to date!")
 
 
 class TestAdvancedSettingsDialog:
     def test_should_update_advanced_settings(self, qtbot: QtBot):
         dialog = AdvancedSettingsDialog(
-            transcription_options=TranscriptionOptions(temperature=(0.0, 0.8), initial_prompt='prompt',
-                                                       model=Model.WHISPER_CPP_BASE))
+            transcription_options=TranscriptionOptions(temperature=(0.0, 0.8), initial_prompt='prompt'))
         qtbot.add_widget(dialog)
 
         transcription_options_mock = Mock()
@@ -267,31 +362,41 @@ class TestTemperatureValidator:
 
 
 class TestTranscriptionViewerWidget:
-    widget = TranscriptionViewerWidget(
-        transcription_task=FileTranscriptionTask(
-            id=0,
-            file_path='testdata/whisper-french.mp3',
-            file_transcription_options=FileTranscriptionOptions(
-                file_paths=['testdata/whisper-french.mp3']),
-            transcription_options=TranscriptionOptions(),
-            segments=[Segment(40, 299, 'Bien'),
-                      Segment(299, 329, 'venue dans')],
-            model_path=''))
 
     def test_should_display_segments(self, qtbot: QtBot):
-        qtbot.add_widget(self.widget)
+        widget = TranscriptionViewerWidget(
+            transcription_task=FileTranscriptionTask(
+                id=0,
+                file_path='testdata/whisper-french.mp3',
+                file_transcription_options=FileTranscriptionOptions(
+                    file_paths=['testdata/whisper-french.mp3']),
+                transcription_options=TranscriptionOptions(),
+                segments=[Segment(40, 299, 'Bien'),
+                          Segment(299, 329, 'venue dans')],
+                model_path=''), open_transcription_output=False)
+        qtbot.add_widget(widget)
 
-        assert self.widget.windowTitle() == 'whisper-french.mp3'
+        assert widget.windowTitle() == 'whisper-french.mp3'
 
-        text_display_box = self.widget.findChild(TextDisplayBox)
+        text_display_box = widget.findChild(TextDisplayBox)
         assert isinstance(text_display_box, TextDisplayBox)
         assert text_display_box.toPlainText(
         ) == '00:00:00.040 --> 00:00:00.299\nBien\n\n00:00:00.299 --> 00:00:00.329\nvenue dans'
 
     def test_should_export_segments(self, tmp_path: pathlib.Path, qtbot: QtBot):
-        qtbot.add_widget(self.widget)
+        widget = TranscriptionViewerWidget(
+            transcription_task=FileTranscriptionTask(
+                id=0,
+                file_path='testdata/whisper-french.mp3',
+                file_transcription_options=FileTranscriptionOptions(
+                    file_paths=['testdata/whisper-french.mp3']),
+                transcription_options=TranscriptionOptions(),
+                segments=[Segment(40, 299, 'Bien'),
+                          Segment(299, 329, 'venue dans')],
+                model_path=''), open_transcription_output=False)
+        qtbot.add_widget(widget)
 
-        export_button = self.widget.findChild(QPushButton)
+        export_button = widget.findChild(QPushButton)
         assert isinstance(export_button, QPushButton)
 
         output_file_path = tmp_path / 'whisper.txt'
@@ -304,10 +409,10 @@ class TestTranscriptionViewerWidget:
 
 
 class TestTranscriptionTasksTableWidget:
-    widget = TranscriptionTasksTableWidget()
 
     def test_upsert_task(self, qtbot: QtBot):
-        qtbot.add_widget(self.widget)
+        widget = TranscriptionTasksTableWidget()
+        qtbot.add_widget(widget)
 
         task = FileTranscriptionTask(id=0, file_path='testdata/whisper-french.mp3',
                                      transcription_options=TranscriptionOptions(),
@@ -315,25 +420,101 @@ class TestTranscriptionTasksTableWidget:
                                          file_paths=['testdata/whisper-french.mp3']), model_path='',
                                      status=FileTranscriptionTask.Status.QUEUED)
 
-        self.widget.upsert_task(task)
+        widget.upsert_task(task)
 
-        assert self.widget.rowCount() == 1
-        assert self.widget.item(0, 1).text() == 'whisper-french.mp3'
-        assert self.widget.item(0, 2).text() == 'Queued'
+        assert widget.rowCount() == 1
+        assert widget.item(0, 1).text() == 'whisper-french.mp3'
+        assert widget.item(0, 2).text() == 'Queued'
 
         task.status = FileTranscriptionTask.Status.IN_PROGRESS
         task.fraction_completed = 0.3524
-        self.widget.upsert_task(task)
+        widget.upsert_task(task)
 
-        assert self.widget.rowCount() == 1
-        assert self.widget.item(0, 1).text() == 'whisper-french.mp3'
-        assert self.widget.item(0, 2).text() == 'In Progress (35%)'
+        assert widget.rowCount() == 1
+        assert widget.item(0, 1).text() == 'whisper-french.mp3'
+        assert widget.item(0, 2).text() == 'In Progress (35%)'
 
 
 class TestRecordingTranscriberWidget:
-    widget = RecordingTranscriberWidget()
+    def test_should_set_window_title(self, qtbot: QtBot):
+        widget = RecordingTranscriberWidget()
+        qtbot.add_widget(widget)
+        assert widget.windowTitle() == 'Live Recording'
 
-    def test_should_set_window_title_and_size(self, qtbot: QtBot):
-        qtbot.add_widget(self.widget)
-        assert self.widget.windowTitle() == 'Live Recording'
-        assert self.widget.size() == QSize(400, 520)
+    def test_should_transcribe(self, qtbot):
+        widget = RecordingTranscriberWidget()
+        qtbot.add_widget(widget)
+
+        def assert_text_box_contains_text():
+            assert len(widget.text_box.toPlainText()) > 0
+
+        widget.record_button.click()
+        qtbot.wait_until(callback=assert_text_box_contains_text, timeout=60 * 1000)
+
+        with qtbot.wait_signal(widget.transcription_thread.finished, timeout=60 * 1000):
+            widget.stop_recording()
+
+        assert 'Welcome to Passe' in widget.text_box.toPlainText()
+
+
+class TestHuggingFaceSearchLineEdit:
+    def test_should_update_selected_model_on_type(self, qtbot: QtBot):
+        widget = HuggingFaceSearchLineEdit(network_access_manager=self.network_access_manager())
+        qtbot.add_widget(widget)
+
+        mock_model_selected = Mock()
+        widget.model_selected.connect(mock_model_selected)
+
+        self._set_text_and_wait_response(qtbot, widget)
+        mock_model_selected.assert_called_with('openai/whisper-tiny')
+
+    def test_should_show_list_of_models(self, qtbot: QtBot):
+        widget = HuggingFaceSearchLineEdit(network_access_manager=self.network_access_manager())
+        qtbot.add_widget(widget)
+
+        self._set_text_and_wait_response(qtbot, widget)
+
+        assert widget.popup.count() > 0
+        assert 'openai/whisper-tiny' in widget.popup.item(0).text()
+
+    def test_should_select_model_from_list(self, qtbot: QtBot):
+        widget = HuggingFaceSearchLineEdit(network_access_manager=self.network_access_manager())
+        qtbot.add_widget(widget)
+
+        mock_model_selected = Mock()
+        widget.model_selected.connect(mock_model_selected)
+
+        self._set_text_and_wait_response(qtbot, widget)
+
+        # press down arrow and enter to select next item
+        QApplication.sendEvent(widget.popup,
+                               QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.NoModifier))
+        QApplication.sendEvent(widget.popup,
+                               QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Enter, Qt.KeyboardModifier.NoModifier))
+
+        mock_model_selected.assert_called_with('openai/whisper-tiny.en')
+
+    @staticmethod
+    def network_access_manager():
+        reply = MockNetworkReply(data=[{'id': 'openai/whisper-tiny'}, {'id': 'openai/whisper-tiny.en'}])
+        return MockNetworkAccessManager(reply=reply)
+
+    @staticmethod
+    def _set_text_and_wait_response(qtbot: QtBot, widget: HuggingFaceSearchLineEdit):
+        with qtbot.wait_signal(widget.network_manager.finished):
+            widget.setText('openai/whisper-tiny')
+            widget.textEdited.emit('openai/whisper-tiny')
+
+
+class TestTranscriptionOptionsGroupBox:
+    def test_should_update_model_type(self, qtbot):
+        widget = TranscriptionOptionsGroupBox()
+        qtbot.add_widget(widget)
+
+        mock_transcription_options_changed = Mock()
+        widget.transcription_options_changed.connect(mock_transcription_options_changed)
+
+        widget.model_type_combo_box.setCurrentIndex(1)
+
+        transcription_options: TranscriptionOptions = mock_transcription_options_changed.call_args[0][0]
+        assert transcription_options.model.model_type == ModelType.WHISPER_CPP
